@@ -1,26 +1,107 @@
 #!/usr/bin/env python2.7
-import cv2, numpy, time, math
+
+# Import Libraries
+import cv2
 import cv2.cv as cv
-from collections import deque
+import numpy
 from numpy import array
+import time
+import math
+from collections import deque
 import wx
  
+# Constants
 CAMERA_INDEX = 0;
+SCALE_FACTOR = 3; # video size will be 1/SCALE_FACTOR
+FACE_CLASSIFIER_PATH = "classifiers/haar-face.xml";
+EYE_CLASSIFIER_PATH = "classifiers/haar-eyes.xml";
+FACE_MIN_SIZE = 80;
+EYE_MIN_SIZE = 10;
 
-cv2.namedWindow("Video", cv2.CV_WINDOW_AUTOSIZE);
+# Setup Webcam
 capture = cv2.VideoCapture(CAMERA_INDEX);
 
 # Reduce Video Size to make Processing Faster
-SCALE_FACTOR = 3; # video size will be 1/SCALE_FACTOR
 height = capture.get(cv.CV_CAP_PROP_FRAME_WIDTH)/SCALE_FACTOR;
 width = capture.get(cv.CV_CAP_PROP_FRAME_HEIGHT)/SCALE_FACTOR;
 capture.set(cv.CV_CAP_PROP_FRAME_WIDTH,height);
 capture.set(cv.CV_CAP_PROP_FRAME_HEIGHT,width);
 
-# Load object detection classifiers
-faceDetector = cv2.CascadeClassifier("haar-face.xml");
-eyeDetector = cv2.CascadeClassifier("haar-eyes.xml");
+# Create window
+cv2.namedWindow("Video", cv2.CV_WINDOW_AUTOSIZE);
 
+# Cascade Classifier Wrapper Class
+class FaceDetector:
+
+	faceClassifier = cv2.CascadeClassifier(FACE_CLASSIFIER_PATH);
+	eyeClassifier = cv2.CascadeClassifier(EYE_CLASSIFIER_PATH);
+	
+	# Detect eyes and faces, returning two sets of coordinates
+	def detect(img, faceRects=False):
+		
+		# Detect face if rectangle not specified
+		if !faceRects:
+			faceRects = self.classifyFace(img);
+		
+		# Ensure 1 face found
+		if len(faceRects) is not 1:
+			# @todo throw error message
+			print "No Face Found!";
+			break;
+
+		# Extract face coordinates
+		x1,y1,x2,y2 = faceRects[0];
+		
+		# Extract eyes region of interest (ROI), cropping mouth and hair
+		faceHeight = y2-y1;
+		y1 = y1 + faceHeight*0.16;
+		y2 = y2 - faceHeight*0.32;
+		eyesROI = img[y1:y2, x1:x2];
+
+		# Search for eyes
+		eyeRects = self.classifyEyes(eyesROI);
+		
+		# Adjust coordinates to be in faceRects coordinate space
+		for e in eyeRects:	
+			e[0] += x1;
+			e[1] += y1;
+			e[2] += x1;
+			e[3] += y1;
+			
+		# @todo split eyes into left and right
+		# @todo error checking
+		
+		return faceRects, eyeRects;
+
+	# Run Cascade Classifier on Image
+	def classify(img, cascade, minSizeX=40):
+	
+		# Run Cascade Classifier
+		rects = cascade.detectMultiScale(
+				img, minSize=(minSizeX,minSizeX), 
+				flags=cv.CV_HAAR_SCALE_IMAGE);
+		
+		# No Results
+		if len(rects) == 0:
+			return [];
+		
+		rects[:,2:] += rects[:,:2]; # ? ? ? 
+		return rects;
+	
+	# Run Face Cascade Classifier on Image
+	def classifyFace(img):
+		return self.classify(img,self.faceClassifier,FACE_MIN_SIZE);
+	
+	# Run Eyes Cascade Classifier on Image
+	def classifyEyes(img):
+		return self.classify(img,self.eyeClassifier,EYE_MIN_SIZE);
+
+class FaceModel:
+
+	QUEUE_MAXLEN = 25;
+	
+		
+	
 class EyeHistory:
 	
 	QUEUE_MAXLEN = 15;
@@ -31,26 +112,28 @@ class EyeHistory:
 	eyeRightMean = [0, 0, 0, 0];
 		
 	def add(self,eyeRects):
+	
+		# Loop over each eye
 		for e in eyeRects:
+		
 			e = array(e); # convert to numpy array
-			diffOne = abs(e[0] - self.eyeLeftMean[0]); 	# difference between top left pixel and old and new eye positions
-			diffTwo = abs(e[0] - self.eyeRightMean[0]);
 			
-			#print 'old diffOne,diffTwo: (',diffOne,', ',diffTwo,')';
-
-			#diffOne = math.hypot((self.eyeLeftMean[0] - e[0]),(self.eyeLeftMean[1] - e[1])); 	
-			#diffTwo = math.hypot((self.eyeRightMean[0] - e[0]),(self.eyeRightMean[1] - e[1]));
-			#print 'new diffOne,diffTwo: (',diffOne,', ',diffTwo,')';
-			#print '--------';
+			# Distance b/w top left pixel of old/new left/right eye positions
+			# @todo find 2D distance using pythagoras' theorem
+			diffLeft = abs(e[0] - self.eyeLeftMean[0]); 	
+			diffRight = abs(e[0] - self.eyeRightMean[0]);
 			
-			if diffOne <= diffTwo:				# if 
+			# Eye Closer to Left than Right
+			if diffLeft <= diffRight:
 				q = self.eyeLeft;
-				if len(self.eyeRight) is 0: # add right point to eye two min, to encourage splitting
+				
+				# If right eye empty, encourage splitting 
+				# Add right point to eyeRight min
+				if len(self.eyeRight) is 0: 
 					self.eyeRightMean[0] = e[3];
 			else:
 				q = self.eyeRight;
 				#if (e[0] > self.eyeLeftMean[0] or e[0] < self.eyeLeftMean[2]) or (e[2] > self.eyeLeftMean[0] or e[2] < self.eyeLeftMean[2]):
-				#	print 'overlapping',time.time()
 				#	continue;
 				   
 			q.append(e);
@@ -58,12 +141,14 @@ class EyeHistory:
 
 		
 	def updateMeans(self):
+	
 		# Calculate Eye One Mean
 		eyeLeftSum = array([0, 0, 0, 0]);
 		for e in self.eyeLeft:
 			eyeLeftSum += e;
 		if len(self.eyeLeft) > 0:
 			self.eyeLeftMean = eyeLeftSum / len(self.eyeLeft);
+			
 		# Calculate Eye Two Mean
 		eyeRightSum = array([0, 0, 0, 0]);
 		for e in self.eyeRight:
@@ -73,7 +158,8 @@ class EyeHistory:
 
 	def getEyeRects(self):
 		return [self.eyeLeftMean, self.eyeRightMean];
-		
+	
+	# Returns Points to create line along axis of eyes
 	def getEyeLine(self):
 		if(self.eyeLeftMean[0] < self.eyeRightMean[0]):
 			left = self.eyeLeftMean;
@@ -86,6 +172,7 @@ class EyeHistory:
 		rightPoint = (right[2], ((right[1] + right[3])/2));
 		return [leftPoint,rightPoint];
 
+	# Resets history
 	def clear(self):
 		self.eyeLeftMean = [0,0,0,0];
 		self.eyeRightMean = [0,0,0,0];
@@ -119,26 +206,14 @@ class FaceHistory:
 eyeH = EyeHistory();
 faceH = FaceHistory();
 
-# Detect Object in Image
-def detect(img, cascade, minSizeX=40):
-
-	# Run Cascade Classifier
-	rects = cascade.detectMultiScale(img, minSize=(minSizeX,minSizeX), flags = cv.CV_HAAR_SCALE_IMAGE);
-	
-	# No Results
-	if len(rects) == 0:
-		return [];
-	
-	rects[:,2:] += rects[:,:2]; # ? ? ? 
-	return rects;
 
 # Draw rectangles on image
 def drawRects(img, rects, color):
 	for x1, y1, x2, y2 in rects:
 		cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
 
-global oldTime = time.time();
-global i = 0;
+oldTime = time.time();
+i = 0;
 global faceRects;
 while True:
 	# Calculate time difference (dt), update oldTime variable
@@ -173,9 +248,9 @@ while True:
 	y1 = y1 + faceHeight*0.16;
 	y2 = y2 - faceHeight*0.32;
 
-	# Extract face ROI
+	# Extract face region of interest (ROI)
 	faceROI = gray[y1:y2, x1:x2];
-	# faceROI = cv2.equalizeHist(faceROI);
+	# faceROI = cv2.equalizeHist(faceROI); # equalizes eye region of interest
 		
 	# Detect Eyes
 	eyeRects = detect(faceROI,eyeDetector,10);
@@ -219,13 +294,3 @@ while True:
 	cv2.moveWindow("eyeLeft",300,200);
 	cv2.imshow("eyeRight",eyeRightVis);
 	cv2.moveWindow("eyeRight",300,260);
-
-	
-
-	# edges = cv2.Canny(frame,60,100);
-	
-# TEMPLATE MATCHING
-# template = cv2.imread('Eyes/groggyTemplate.png');
-#matches = cv2.matchTemplate(frame,template,CV_TM_SQDIFF);
-#minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(matches);
-#cv2.rectangle(frame,minLoc,(minLoc[0]+10,minLoc[1]+10),0.5);
