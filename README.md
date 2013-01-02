@@ -2,6 +2,7 @@ nap-alert
 =========
 
 By Brandon Jackson
+
 Project started December 2012
 
 *nap-alert* is a fatigue detection system that alerts users when they are falling asleep. The app is designed to combat [narcolepsy][1] and [microsleep][2].

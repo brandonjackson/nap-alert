@@ -1,13 +1,21 @@
 #!/usr/bin/env python2.7
 
+"""
+nap-alert
+by Brandon Jackson
+
+nap-alert.py
+Main python script
+"""
+
 # Import Libraries
-import cv2
-import cv2.cv as cv
-import numpy
-from numpy import array
 import time
 import math
 from collections import deque
+
+import numpy
+import cv2
+import cv2.cv as cv
 import wx
  
 # Constants
@@ -30,51 +38,93 @@ capture.set(cv.CV_CAP_PROP_FRAME_HEIGHT,width);
 # Create window
 cv2.namedWindow("Video", cv2.CV_WINDOW_AUTOSIZE);
 
-# Cascade Classifier Wrapper Class
 class FaceDetector:
 
+	"""
+	FaceDetector is a wrapper for the cascade classifiers.
+	Should be initialized once per program instance.
+	"""
+
+	# Load Haar Cascade Classifiers
 	faceClassifier = cv2.CascadeClassifier(FACE_CLASSIFIER_PATH);
 	eyeClassifier = cv2.CascadeClassifier(EYE_CLASSIFIER_PATH);
 	
-	# Detect eyes and faces, returning two sets of coordinates
-	def detect(img, faceRects=False):
+	# 
+	# Args
+	def detect(self,img, faceRects=False):
+		"""
+		Detect face and eyes. 
+		Runs Haar cascade classifiers. Sometimes it is desirable to speed up 
+		processing by using a previously-found face rectangle. To do this, pass 
+		the old faceRects as the second argument.
 		
-		# Detect face if rectangle not specified
-		if !faceRects:
-			faceRects = self.classifyFace(img);
-		
-		# Ensure 1 face found
-		if len(faceRects) is not 1:
-			# @todo throw error message
-			print "No Face Found!";
-			break;
+		Args:
+			img (numpy array): input image
+			faceRects (numpy array): array of face rectangle. Face detected if 
+									 omitted.
+		Returns:
+			a dictionary with three elements each representing a rectangle
+		"""
 
-		# Extract face coordinates
-		x1,y1,x2,y2 = faceRects[0];
+		# Data structure to hold frame info
+		rects = {
+			'face': [],
+			'eyeLeft': [],
+			'eyeRight': []
+		};
+		
+		# Detect face if old faceRects not provided
+		if not faceRects:
+			faceRects = self._classifyFace(img);
+		
+		# Ensure a single face found
+		if len(faceRects) > 1:
+			# TODO throw error message
+			print "Multiple Faces Found!";
+			return;
+		if len(faceRects) == 0:
+			# TODO throw error message, or perhaps not in this case
+			return rects;
+
+		rects['face'] = faceRects[0];
+
+		# Extract face coordinates, calculate center and diameter
+		x1,y1,x2,y2 = rects['face'];
+		faceCenter = (((x1+x2)/2.0), ((y1+y2)/2.0));
+		faceDiameter = y2-y1;
 		
 		# Extract eyes region of interest (ROI), cropping mouth and hair
-		faceHeight = y2-y1;
-		y1 = y1 + faceHeight*0.16;
-		y2 = y2 - faceHeight*0.32;
-		eyesROI = img[y1:y2, x1:x2];
+		eyesY1 = y1 + (faceDiameter * 0.16);
+		eyesY2 = y2 - (faceDiameter * 0.32);
+		eyesROI = img[eyesY1:eyesY2, x1:x2];
 
-		# Search for eyes
-		eyeRects = self.classifyEyes(eyesROI);
+		# Search for eyes in ROI
+		eyeRects = self._classifyEyes(eyesROI);
 		
-		# Adjust coordinates to be in faceRects coordinate space
-		for e in eyeRects:	
-			e[0] += x1;
-			e[1] += y1;
-			e[2] += x1;
-			e[3] += y1;
+		# Ensure (at most) two eyes found
+		if len(eyeRects) > 2:
+			# TODO throw error message
+			print "Multiple Eyes Found!";
+			return;
+
+		# Loop over each eye
+		for e in eyeRects:
+			# Adjust coordinates to be in faceRects coordinate space
+			e += rects['face'];
 			
-		# @todo split eyes into left and right
-		# @todo error checking
+			# Split left and right eyes. Compare eye and face midpoints.
+			eyeMidpointX = (e[0]+e[2])/2.0;
+			if eyeMidpointX < faceCenter[0]:
+				rects['eyeLeft'] = e; # TODO prevent overwriting
+			else:
+				rects['eyeRight'] = e;
+		# TODO error checking
+		# TODO calculate signal quality
 		
-		return faceRects, eyeRects;
+		return rects;
 
 	# Run Cascade Classifier on Image
-	def classify(img, cascade, minSizeX=40):
+	def _classify(self,img, cascade, minSizeX=40):
 	
 		# Run Cascade Classifier
 		rects = cascade.detectMultiScale(
@@ -86,21 +136,103 @@ class FaceDetector:
 			return [];
 		
 		rects[:,2:] += rects[:,:2]; # ? ? ? 
+		rects = numpy.array(rects);
 		return rects;
 	
 	# Run Face Cascade Classifier on Image
-	def classifyFace(img):
-		return self.classify(img,self.faceClassifier,FACE_MIN_SIZE);
+	def _classifyFace(self,img):
+		return self._classify(img,self.faceClassifier,FACE_MIN_SIZE);
 	
 	# Run Eyes Cascade Classifier on Image
-	def classifyEyes(img):
-		return self.classify(img,self.eyeClassifier,EYE_MIN_SIZE);
+	def _classifyEyes(self,img):
+		return self._classify(img,self.eyeClassifier,EYE_MIN_SIZE);
 
 class FaceModel:
 
+	"""
+	FaceModel integrates data from the new frame into a model that keeps track of where the eyes are. To do this it uses:
+		- A moving average of the most recent frames
+		- Facial geometry to fill in missing data
+	The resulting model generates a set of two specific regions of interest (ROI's) where blinking is expected to take place.
+	"""
+
 	QUEUE_MAXLEN = 25;
 	
+	# Queues storing most recent position rectangles, used to calculate
+	# moving averages
+	rectHistory = {
+		'face': deque(maxlen=QUEUE_MAXLEN),
+		'eyeLeft': deque(maxlen=QUEUE_MAXLEN),
+		'eyeRight': deque(maxlen=QUEUE_MAXLEN)
+	};
+	
+	# Moving average of position rectangles
+	rectAverage = {
+		'face': [],
+		'eyeLeft': [],
+		'eyeRight': []
+	};
+	
+	def add(self,rects):
+		"""Add new set of rectangles to model"""
 		
+		# Checks to see if face has moved significantly. If so, resets history.
+		if(self._faceHasMoved(rects['face'])):
+			self.clear();
+		
+		# Loop over face, eyeLeft and eyeRight, adding rects to history
+		for key,rect in rects.items():
+			# Skip empty members
+			if rect is []:
+				continue;
+			# Add to position average history
+			self.rectHistory[key].append(rect);
+		
+		# Update moving average stats
+		self._updateAverages();
+	
+	def getEyeRects(self):
+		"""Get array of eye rectangles"""
+		return [self.rectAverage['eyeLeft'], self.rectAverage['eyeRight']];
+
+	def getEyeLine(self):
+		"""Returns Points to create line along axis of eyes"""
+		left,right = self.getEyeRects();
+		leftPoint = (left[0], ((left[1] + left[3])/2));
+		rightPoint = (right[2], ((right[1] + right[3])/2));
+		return [leftPoint,rightPoint];
+		
+	def clear(self):
+		""" Resets Eye History"""
+		self.rectAverage['eyeLeft']=[];
+		self.rectAverage['eyeRight']=[];
+		self.rectHistory['eyeLeft'].clear();
+		self.rectHistory['eyeRight'].clear();
+
+	def _faceHasMoved(self, recentFaceRect):
+		"""Determines if face has just moved, requiring history reset"""
+	
+		# If no face found, return true
+		if(len(recentFaceRect) is 0):
+			return True;
+
+		history = self.rectHistory['face'];
+		
+		if len(history) is not self.QUEUE_MAXLEN:
+			return False;
+
+		old = history[self.QUEUE_MAXLEN-3];
+		oldX = (old[0] + old[2]) / 2.0;
+		oldY = (old[1] + old[3]) / 2.0;
+		recentX = (recentFaceRect[0] + recentFaceRect[2]) / 2.0;
+		recentY = (recentFaceRect[1] + recentFaceRect[3]) / 2.0;
+		change = ((recentX-oldX)**2 + (recentY-oldY)**2)**0.5; # magnitude i.e. sqrt(a^2+b^2)
+		return True if change > 20 else False;
+
+	def _updateAverages(self):
+		"""Update position rectangle moving averages"""
+		for key,queue in self.rectHistory.items():
+			self.rectAverages[key] = sum(queue) / float(len(queue));
 	
 class EyeHistory:
 	
@@ -116,10 +248,10 @@ class EyeHistory:
 		# Loop over each eye
 		for e in eyeRects:
 		
-			e = array(e); # convert to numpy array
+			e = numpy.array(e); # convert to numpy array
 			
 			# Distance b/w top left pixel of old/new left/right eye positions
-			# @todo find 2D distance using pythagoras' theorem
+			# TODO find 2D distance using pythagoras' theorem
 			diffLeft = abs(e[0] - self.eyeLeftMean[0]); 	
 			diffRight = abs(e[0] - self.eyeRightMean[0]);
 			
@@ -143,14 +275,14 @@ class EyeHistory:
 	def updateMeans(self):
 	
 		# Calculate Eye One Mean
-		eyeLeftSum = array([0, 0, 0, 0]);
+		eyeLeftSum = numpy.array([0, 0, 0, 0]);
 		for e in self.eyeLeft:
 			eyeLeftSum += e;
 		if len(self.eyeLeft) > 0:
 			self.eyeLeftMean = eyeLeftSum / len(self.eyeLeft);
 			
 		# Calculate Eye Two Mean
-		eyeRightSum = array([0, 0, 0, 0]);
+		eyeRightSum = numpy.array([0, 0, 0, 0]);
 		for e in self.eyeRight:
 			eyeRightSum += e;
 		if len(self.eyeRight) > 0:
@@ -205,7 +337,6 @@ class FaceHistory:
 
 eyeH = EyeHistory();
 faceH = FaceHistory();
-
 
 # Draw rectangles on image
 def drawRects(img, rects, color):
@@ -264,9 +395,9 @@ while True:
 	# Get mean eyeRects coordinates
 	eyeH.add(eyeRects);
 	eyeRects = eyeH.getEyeRects();
-	# @todo flush eye history whenever faceRects midpoint changes
-	# @todo flush eye history whenever eye rectangle outside of faceRects bbox
-	# @todo make sure that eye rectangles don't overlap
+	# TODO flush eye history whenever faceRects midpoint changes
+	# TODO flush eye history whenever eye rectangle outside of faceRects bbox
+	# TODO make sure that eye rectangles don't overlap
 	
 	linePoints = eyeH.getEyeLine();
 	cv2.line(displayFrame, linePoints[0],linePoints[1],(0, 0, 255));
