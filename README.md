@@ -19,6 +19,14 @@ System Requirements
 
 *nap-alert* should work on any OSX, Linux or Windows system with an OpenCV-compatible webcam. OpenCV maintains a list of these cameras [here][5].
 
+Dependencies
+-------------------
+
+The code was run with OpenCV 2.4.3 and Python 2.7
+The following python modules should be downoaded and installed:
+numpy (version 1.7.0)
+Python Imaging Library PIL (free version 1.1.7)
+
 Code Overview
 -------------
 

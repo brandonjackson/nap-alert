@@ -21,7 +21,6 @@ import Image
 import ImageOps
 import ImageEnhance
 from scipy.cluster import vq
-import wx
 import matplotlib
 import matplotlib.pyplot as plt
 
