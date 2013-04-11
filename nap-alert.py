@@ -20,9 +20,9 @@ import cv2.cv as cv
 import Image
 import ImageOps
 import ImageEnhance
-from scipy.cluster import vq
-import matplotlib
-import matplotlib.pyplot as plt
+#from scipy.cluster import vq
+#import matplotlib
+#import matplotlib.pyplot as plt
 
  
 # Constants
